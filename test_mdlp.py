@@ -41,8 +41,8 @@ class TestMDLPDiscretizer:
         X_train, y_train = pd.DataFrame(X_train, columns=feature_names), pd.Series(y_train)
         X_test, y_test = pd.DataFrame(X_test, columns=feature_names), pd.Series(y_test)
 
-        X_train.iloc[:, 3] = X_train.iloc[:, 3].astype('str')
-        X_test.iloc[:, 3] = X_test.iloc[:, 3].astype('str')
+        X_train.iloc[:, 3] = 'g'
+        X_test.iloc[:, 3] = 'f'
 
         discretizer = MDLPDiscretizer(features=feature_names[:3])
         discretizer.fit(X_train, y_train)

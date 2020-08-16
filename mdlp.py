@@ -252,7 +252,7 @@ class MDLPDiscretizer(TransformerMixin):
 
         boundaries = np.empty(X.shape)
         boundaries[:, self.features_idx] = np.apply_along_axis(padded_cutpoints_array, 0,
-                                                               X.to_numpy(dtype=np.float64)[:, self.features_idx],
+                                                               X.iloc[:, self.features_idx].to_numpy(dtype=np.float64),
                                                                y.to_numpy(dtype=np.float64),
                                                                X.shape[0])
         mask = np.all(np.isnan(boundaries), axis=1)
@@ -349,7 +349,7 @@ class MDLPDiscretizer(TransformerMixin):
             self
         """
         for attr in self.features_idx:
-            self.single_feature_accepted_cutpoints(X=X.to_numpy(dtype=np.float64)[:, attr],
+            self.single_feature_accepted_cutpoints(X=X.iloc[:, attr].to_numpy(dtype=np.float64),
                                                    y=y.to_numpy(dtype=np.float64), feature_idx=attr)
         return
 
