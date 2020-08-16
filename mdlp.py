@@ -4,7 +4,6 @@ import numpy as np
 from pandas.api.types import is_sparse
 from scipy.stats import entropy
 from sklearn.base import TransformerMixin
-from sklearn.utils import check_X_y
 
 from typing import Optional, Union
 
@@ -104,7 +103,7 @@ def get_bad_pandas_dtypes(dtypes: list) -> list:
 
 
 class MDLPDiscretizer(TransformerMixin):
-    def __init__(self, features=None):
+    def __init__(self, features=None, return_intervals=True, return_df=True):
         """
         This is a sklearn-transformer-compliant MDLP Discretizer that discretizes numeric features according to the
         MDLPC criterion.
@@ -113,56 +112,42 @@ class MDLPDiscretizer(TransformerMixin):
         1993. IJCAI-93.
 
         Args:
-            features: features to discretize (default all)
+            features: features to discretize (default all numeric features)
+            return_intervals: return intervals or nominal values
+            return_df: return pandas dataframe
         """
-        self._col_idx = None
-        self._bin_descriptions = {}
-        self._boundaries = None
-        self._ignore_col_idx = None
-        self._class_labels = None
-        self._n_class = None
-        self._data_raw = None
-        self._data_raw_np = None
-        self._cuts = None
-
-        # Create array with attr indices to discretize
-        if features is None:
-            # discretize all columns
-            self._col_idx = None
-        else:
-            if not isinstance(features, np.ndarray):
-                features = np.array(features)
-            # if array[bool, str, int] then (features as mask)
-            if (np.issubdtype(features.dtype, np.dtype(int).type) or
-                    np.issubdtype(features.dtype, np.dtype(bool).type) or
-                    np.issubdtype(features.dtype, np.dtype(str).type)):
-                self._col_idx = features
-            else:
-                raise Exception('features must be np.array of {bool, int, str}')
+        self.return_intervals = return_intervals
+        self.features = features
+        self.features_idx = None
+        self.colname2idx = {}
+        self.idx2colname = {}
+        self.return_df = return_df
+        self.bin_descriptions = {}
+        self.boundaries = None
+        self.class_labels = None
+        self.cuts = None
 
     def fit(self, X: Union[np.ndarray, pd.DataFrame], y: Union[np.ndarray, pd.Series]):
-        # if array[bool] or array[str], check the length and make sure all columns exist before proceeding further.
-        self._data_raw, self._class_labels = check_X_y(X, y)
-        self._n_class = np.unique(self._class_labels)
-        self.set_col_idx(X)
+        X, y = self.convert_array_into_df(X), self.convert_vector_into_series(y)
 
-        # if not all index is given then some must be skipped.
-        if len(self._col_idx) != self._data_raw.shape[1]:
-            self._ignore_col_idx = np.array([c for c in range(self._data_raw.shape[1]) if c not in self._col_idx])
-
-        # given the col index to discretize, they must all be of acceptable dtype
-        if type(X) == pd.DataFrame:
-            bad_indices = get_bad_pandas_dtypes(X.iloc[:, self._col_idx].dtypes)
-            assert bad_indices == [], 'Did not expect the dtypes in the following column indices: {}'.format(bad_indices)
+        # if no features is passed, select all numeric type features to be discretized
+        if self.features is None:
+            self.features = list(X.select_dtypes(include=['float', 'int']).columns)
+        for idx, col in enumerate(X.columns):
+            if col in self.features:
+                self.colname2idx[col] = idx
+                self.idx2colname[idx] = col
+        # indices of features to be discretized
+        self.features_idx = [self.colname2idx[x] for x in self.features]
 
         # initialize feature bins cut points
-        self._cuts = {f: [] for f in self._col_idx}
+        self.cuts = {f: [] for f in self.features_idx}
 
         # pre-compute all boundary points in dataset
-        self._boundaries = self.compute_boundary_points_all_features()
+        self.boundaries = self.compute_boundary_points_all_features(X, y)
 
         # get cuts for all features
-        self.all_features_accepted_cutpoints()
+        self.all_features_accepted_cutpoints(X, y)
 
         # generate bin string descriptions
         self.generate_bin_descriptions()
@@ -170,39 +155,19 @@ class MDLPDiscretizer(TransformerMixin):
         return self
 
     def transform(self, X: Union[np.ndarray, pd.DataFrame]):
+        X = self.convert_array_into_df(X)
         discretized = self.apply_cutpoints(X.copy())
+        if not self.return_df:
+            discretized = discretized.to_numpy(copy=True)
         return discretized
 
     def fit_transform(self, X: Union[np.ndarray, pd.DataFrame],
                       y: Union[np.ndarray, pd.DataFrame] = None, **fit_params):
         self.fit(X, y)
-        # X may be a pandas dataframe
-        _X, _y = check_X_y(X, y)
-        return self.transform(_X)
-
-    def set_col_idx(self, X):
-        # if features argument was not set, then assume all features need to be discretized
-        if self._col_idx is None:
-            self._col_idx = np.arange(self._data_raw.shape[1])
-        # if array[int], make sure the max index does not exceed the feature shape
-        elif np.issubdtype(self._col_idx.dtype, np.dtype(int).type):
-            assert np.max(self._col_idx) <= (self._data_raw.shape[1] - 1),\
-                'Max index ({}) does not match the feature shape ({})'\
-                .format(np.max(self._col_idx), self._data_raw.shape[1])
-        # if array[bool], make sure that the length of the mask and features match
-        elif np.issubdtype(self._col_idx.dtype, np.dtype(bool).type):
-            assert len(self._col_idx) == self._data_raw.shape[1],\
-                'The length of the boolean feature mask ({}) must match that of the feature matrix ({}).'\
-                .format(len(self._col_idx), self._data_raw.shape[1])
-            self._col_idx = np.where(self._col_idx)
-        # if array[str], make sure all feature names exist in the feature data frame (assume pandas)
-        elif np.issubdtype(self._col_idx.dtype, np.dtype(str).type):
-            _col_mask = [c in X.columns for c in X.columns]
-            assert np.all(_col_mask), 'These columns do not exist in the data: {}'\
-                .format(X.columns[np.invert(_col_mask)])
-            self._col_idx = np.array([X.columns.get_loc(c) for c in self._col_idx])
-        else:
-            raise ValueError
+        discretized = self.transform(X)
+        if not self.return_df:
+            discretized = discretized.to_numpy(copy=True)
+        return discretized
 
     def mdlpc_criterion(self, X: np.ndarray, y: np.ndarray, cut_point: float) -> bool:
         """
@@ -238,12 +203,13 @@ class MDLPDiscretizer(TransformerMixin):
         else:
             return False
 
-    def feature_boundary_points(self, values: np.ndarray) -> np.ndarray:
+    def feature_boundary_points(self, values: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
         Given an attribute, find all potential cut points.
 
         Args:
             values (np.ndarray): feature values (column)
+            y (np.ndarray): label values
 
         Returns:
             np.ndarray: array of potential cut points
@@ -253,7 +219,7 @@ class MDLPDiscretizer(TransformerMixin):
             return a[idx]
 
         missing_mask = np.isnan(values)
-        data_partition = np.concatenate([values[:, np.newaxis], self._class_labels[:, np.newaxis]], axis=1)
+        data_partition = np.concatenate([values[:, np.newaxis], y[:, np.newaxis]], axis=1)
         data_partition = data_partition[~missing_mask]
         # sort data by values
         data_partition = data_partition[data_partition[:, 0].argsort()]
@@ -271,29 +237,30 @@ class MDLPDiscretizer(TransformerMixin):
         boundaries_offset = np.array([previous_item(unique_vals, var) for var in boundaries])
         return (np.array(boundaries) + boundaries_offset) / 2
 
-    def compute_boundary_points_all_features(self) -> np.ndarray:
+    def compute_boundary_points_all_features(self, X: pd.DataFrame, y: pd.Series) -> np.ndarray:
         """
-        Compute all possible boundary points for each attribute (column) in self._col_idx.
+        Compute all possible boundary points for each attribute (column) in self.idx2colname.keys().
 
         Returns:
             np.ndarray: array of boundary points (cut points)
 
         """
-        def padded_cutpoints_array(arr, N):
-            cutpoints = self.feature_boundary_points(arr)
+        def padded_cutpoints_array(arr, y, N):
+            cutpoints = self.feature_boundary_points(arr, y)
             padding = np.array([np.nan] * (N - len(cutpoints)))
             return np.concatenate([cutpoints, padding])
 
-        boundaries = np.empty(self._data_raw.shape)
-        boundaries[:, self._col_idx] = np.apply_along_axis(padded_cutpoints_array, 0,
-                                                           self._data_raw[:, self._col_idx],
-                                                           self._data_raw.shape[0])
+        boundaries = np.empty(X.shape)
+        boundaries[:, self.features_idx] = np.apply_along_axis(padded_cutpoints_array, 0,
+                                                               X.to_numpy(dtype=np.float64)[:, self.features_idx],
+                                                               y.to_numpy(dtype=np.float64),
+                                                               X.shape[0])
         mask = np.all(np.isnan(boundaries), axis=1)
         return boundaries[~mask]
 
     def boundaries_in_partition(self, X: np.ndarray, feature_idx: int) -> np.ndarray:
         """
-        From the collection of all cut points (self._boundaries), find cut points that fall within the value range of
+        From the collection of all cut points (self.boundaries), find cut points that fall within the value range of
         the feature
         Args:
             X (np.ndarray): feature to split
@@ -303,9 +270,9 @@ class MDLPDiscretizer(TransformerMixin):
             np.ndarray: array of unique cut point values that fall within the value range of the feature
         """
         range_min, range_max = (X.min(), X.max())
-        mask = np.logical_and((self._boundaries[:, feature_idx] > range_min),
-                              (self._boundaries[:, feature_idx] < range_max))
-        return np.unique(self._boundaries[:, feature_idx][mask])
+        mask = np.logical_and((self.boundaries[:, feature_idx] > range_min),
+                              (self.boundaries[:, feature_idx] < range_max))
+        return np.unique(self.boundaries[:, feature_idx][mask])
 
     def best_cut_point(self, X, y, feature_idx) -> Optional[float]:
         """
@@ -367,22 +334,23 @@ class MDLPDiscretizer(TransformerMixin):
             right_partition = X[right_mask]
             if (left_partition.size == 0) or (right_partition.size == 0):
                 return  # extreme point selected, don't partition
-            self._cuts[feature_idx] += [cut_candidate]  # accept partition
+            self.cuts[feature_idx] += [cut_candidate]  # accept partition
             self.single_feature_accepted_cutpoints(left_partition, y[left_mask], feature_idx)
             self.single_feature_accepted_cutpoints(right_partition, y[right_mask], feature_idx)
             # order cutpoints in ascending order
-            self._cuts[feature_idx] = sorted(self._cuts[feature_idx])
+            self.cuts[feature_idx] = sorted(self.cuts[feature_idx])
             return
 
-    def all_features_accepted_cutpoints(self):
+    def all_features_accepted_cutpoints(self, X: pd.DataFrame, y: pd.Series):
         """
         Compute cut points that are accepted by the MDLP criterion for all features.
 
         Returns:
             self
         """
-        for attr in self._col_idx:
-            self.single_feature_accepted_cutpoints(X=self._data_raw[:, attr], y=self._class_labels, feature_idx=attr)
+        for attr in self.features_idx:
+            self.single_feature_accepted_cutpoints(X=X.to_numpy(dtype=np.float64)[:, attr],
+                                                   y=y.to_numpy(dtype=np.float64), feature_idx=attr)
         return
 
     def generate_bin_descriptions(self):
@@ -393,56 +361,75 @@ class MDLPDiscretizer(TransformerMixin):
             self
         """
         bin_label_collection = {}
-        for attr in self._col_idx:
-            if len(self._cuts[attr]) == 0:
+        for attr in self.features_idx:
+            if len(self.cuts[attr]) == 0:
                 bin_label_collection[attr] = ['All']
             else:
-                cuts = [-np.inf] + self._cuts[attr] + [np.inf]
+                cuts = [-np.inf] + self.cuts[attr] + [np.inf]
                 start_bin_indices = range(0, len(cuts) - 1)
                 bin_labels = ['{}_to_{}'.format(str(cuts[i]), str(cuts[i + 1])) for i in start_bin_indices]
                 bin_label_collection[attr] = bin_labels
-                self._bin_descriptions[attr] = {i: bin_labels[i] for i in range(len(bin_labels))}
+                self.bin_descriptions[attr] = {i: bin_labels[i] for i in range(len(bin_labels))}
 
-    def apply_cutpoints(self, data: np.ndarray) -> np.ndarray:
+    def apply_cutpoints(self, X: pd.DataFrame) -> pd.DataFrame:
         """
         Discretize the data by applying pre-calculated bin conditions.
 
         Args:
-            data: the data to be discretized
+            X: the data to be discretized
 
         Returns:
-            np.ndarray: discretized data
+            pd.DataFrame: discretized data
         """
-        for attr in self._col_idx:
-            if len(self._cuts[attr]) == 0:
+        for attr in self.features_idx:
+            if len(self.cuts[attr]) == 0:
                 # data[:, attr] = 'All'
-                data[:, attr] = 0
+                X.iloc[:, attr] = 0
             else:
-                cuts = [-np.inf] + self._cuts[attr] + [np.inf]
-                discretized_col = np.digitize(x=data[:, attr], bins=cuts, right=False).astype('float') - 1
-                discretized_col[np.isnan(data[:, attr])] = np.nan
-                data[:, attr] = discretized_col
-        return data
+                cuts = [-np.inf] + self.cuts[attr] + [np.inf]
+                # discretized_col = np.digitize(x=data[:, attr], bins=cuts, right=False).astype('float') - 1
+                # discretized_col[np.isnan(data[:, attr])] = np.nan
+                if self.return_intervals:
+                    discretized_col = pd.cut(X.iloc[:, attr], bins=cuts, right=False)
+                else:
+                    discretized_col = pd.cut(X.iloc[:, attr], bins=cuts, right=False).cat.codes
+                X.iloc[:, attr] = discretized_col
+        return X
 
+    def convert_array_into_df(self, X, columns=None, deepcopy=False):
+        if isinstance(X, pd.DataFrame):
+            if deepcopy:
+                X = X.copy(deep=True)
+        else:
+            if columns is not None:
+                assert np.size(X, 1) == len(columns), 'dimension mismatch'
+            if isinstance(X, list) or isinstance(X, (np.generic, np.ndarray)):
+                X = pd.DataFrame(X, columns=columns, copy=deepcopy)
+            else:
+                raise ValueError('Unexpected input type: {}'.format(str(type(X))))
+        return X
 
-if __name__ == '__main__':
-    from sklearn.datasets import load_iris
-    from sklearn.model_selection import train_test_split
-
-    dataset = load_iris()
-    org_X, org_y = dataset['data'], dataset['target']
-    feature_names, class_names = dataset['feature_names'], dataset['target_names']
-    numeric_features = np.arange(org_X.shape[1])
-    X_train, X_test, y_train, y_test = train_test_split(org_X, org_y, test_size=0.33)
-
-    discretizer = MDLPDiscretizer(features=numeric_features)
-    discretizer.fit(X_train, y_train)
-    X_train_discretized = discretizer.transform(X_train)
-    X_test_discretized = discretizer.transform(X_test)
-
-    print('Original dataset:\n{}'.format(str(X_train[0:5])))
-    print('Discretized dataset:\n{}'.format(str(X_train_discretized[0:5])))
-
-    print('Features: {}'.format(', '.join(feature_names)))
-    print('Interval cut-points:\n{}'.format(str(discretizer._cuts)))
-    print('Bin descriptions:\n{}'.format(str(discretizer._bin_descriptions)))
+    def convert_vector_into_series(self, y, index=None):
+        assert y is not None, 'y cannot be None'
+        if isinstance(y, pd.Series):
+            return y
+        elif np.isscalar(y):
+            return pd.Series([y], name='target', index=index)
+        elif isinstance(y, np.ndarray):
+            if len(np.shape(y)) == 1:
+                return pd.Series(y, name='target', index=index)
+            elif len(np.shape(y)) == 2 and np.shape(y)[0] == 1:
+                return pd.Series(y[0, :], name='target', index=index)
+            elif len(np.shape(y)) == 2 and np.shape(y)[1] == 1:
+                return pd.Series(y[:, 0], name='target', index=index)
+            else:
+                raise ValueError('Unexpected input shape: {}'.format(np.shape(y)))
+        elif isinstance(y, list):
+            if len(y) == 0 or (len(y) > 0 and not isinstance(y[0], list)):
+                return pd.Series(y, name='target', index=index)
+            else:
+                raise ValueError('Unexpected input list shape: {}'.format(y))
+        elif isinstance(y, pd.DataFrame):
+            raise ValueError('DataFrame y is not supported')
+        else:
+            return pd.Series(y, name='target', index=index)
