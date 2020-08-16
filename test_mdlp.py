@@ -105,3 +105,15 @@ class TestMDLPDiscretizer:
         assert all(np.unique(X_train_discretized[:, 0]) == np.array([0,1]))
         assert all(np.unique(X_train_discretized[:, 1]) == np.array([0,1]))
         assert all(np.unique(X_train_discretized[:, 2]) == np.array([0,1,2]))
+
+    def test_no_possible_cuts(self):
+        X, y = np.ones((100,10)), np.ones((100,1))
+        discretizer = MDLPDiscretizer(return_df=True, return_intervals=True)
+        discretizer.fit(X, y)
+
+        Xp = np.ones((100,10))
+        discretized = discretizer.transform(Xp)
+
+        assert type(discretized) == pd.DataFrame
+        assert all(discretized.nunique() == 1)
+        assert all(np.unique(discretized.values) == pd.Interval(-np.inf, +np.inf, closed='left'))

@@ -360,15 +360,15 @@ class MDLPDiscretizer(TransformerMixin):
         Returns:
             self
         """
-        bin_label_collection = {}
         for attr in self.features_idx:
+            # if no cuts were found, bundle all values into one category
             if len(self.cuts[attr]) == 0:
-                bin_label_collection[attr] = ['All']
+                self.cuts[attr] = [-np.inf, +np.inf]
+                self.bin_descriptions[attr] = {0: '-inf_to_+inf'}
             else:
                 cuts = [-np.inf] + self.cuts[attr] + [np.inf]
                 start_bin_indices = range(0, len(cuts) - 1)
                 bin_labels = ['{}_to_{}'.format(str(cuts[i]), str(cuts[i + 1])) for i in start_bin_indices]
-                bin_label_collection[attr] = bin_labels
                 self.bin_descriptions[attr] = {i: bin_labels[i] for i in range(len(bin_labels))}
 
     def apply_cutpoints(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -382,18 +382,17 @@ class MDLPDiscretizer(TransformerMixin):
             pd.DataFrame: discretized data
         """
         for attr in self.features_idx:
-            if len(self.cuts[attr]) == 0:
-                # data[:, attr] = 'All'
-                X.iloc[:, attr] = 0
+            if len(self.cuts[attr]) == 2 and self.bin_descriptions[attr] == {0: '-inf_to_+inf'}:
+                cuts = [-np.inf, +np.inf]
             else:
                 cuts = [-np.inf] + self.cuts[attr] + [np.inf]
                 # discretized_col = np.digitize(x=data[:, attr], bins=cuts, right=False).astype('float') - 1
                 # discretized_col[np.isnan(data[:, attr])] = np.nan
-                if self.return_intervals:
-                    discretized_col = pd.cut(X.iloc[:, attr], bins=cuts, right=False)
-                else:
-                    discretized_col = pd.cut(X.iloc[:, attr], bins=cuts, right=False).cat.codes
-                X.iloc[:, attr] = discretized_col
+            if self.return_intervals:
+                discretized_col = pd.cut(X.iloc[:, attr], bins=cuts, right=False)
+            else:
+                discretized_col = pd.cut(X.iloc[:, attr], bins=cuts, right=False).cat.codes
+            X.iloc[:, attr] = discretized_col
         return X
 
     def convert_array_into_df(self, X, columns=None, deepcopy=False):
